@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Mock: curl – codeload-Tarball + HTTP-Checks gegen den systemd-State.
+set -uo pipefail
+
+STATE="${HARNESS_STATE:?HARNESS_STATE fehlt}"
+mkdir -p "$STATE/curl-calls"
+
+out=""
+url=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    a="${args[$i]}"
+    case "$a" in
+        -o | --output)
+            out="${args[$((i + 1))]:-}"
+            i=$((i + 1))
+            ;;
+        -*) ;;
+        *) url="$a" ;;
+    esac
+done
+echo "$url" >> "$STATE/curl-calls/urls.log"
+
+case "$url" in
+    *codeload.github.com*)
+        [[ -n "$out" ]] || { echo "mock-curl: -o fehlt (codeload)" >&2; exit 1; }
+        cp "${HARNESS_SRC_TARBALL:?HARNESS_SRC_TARBALL fehlt}" "$out"
+        ;;
+    http://127.0.0.1:*/api/status)
+        if [[ -f "$STATE/systemd/codewaechter.service.active" ]]; then
+            if [[ -n "$out" ]]; then
+                # -o /dev/null -w '%{http_code}' → nur der HTTP-Code
+                printf '200'
+            else
+                # Body-Abruf (Verifikation der API-Identität / --status)
+                printf '{"app":"CodeWächter","version":"1.0.0","projects":2,"data_dir":"/opt/codewaechter/data"}'
+            fi
+        else
+            printf '000'
+        fi
+        ;;
+    http://127.0.0.1:*)
+        # SPA-Check (/) → 200 nur wenn Service aktiv
+        if [[ -f "$STATE/systemd/codewaechter.service.active" ]]; then
+            printf '200'
+        else
+            printf '000'
+        fi
+        ;;
+    *)
+        echo "mock-curl: unerwartete URL: $url" >&2
+        exit 6
+        ;;
+esac

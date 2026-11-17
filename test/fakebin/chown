@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Mock: chown – der Mock-useradd erzeugt keinen echten Eintrag in /etc/passwd,
+# daher würde `chown codewaechter:…` mit "invalid user" scheitern. Im
+# Namespace ist ohnehin alles root → benannte Owner numerisch übersetzen.
+set -uo pipefail
+
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    a="${args[$i]}"
+    case "$a" in
+        codewaechter:codewaechter) args[$i]="0:0" ;;
+        codewaechter) args[$i]="0" ;;
+    esac
+done
+exec /usr/bin/chown "${args[@]}"

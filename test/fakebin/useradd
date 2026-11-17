@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Mock: useradd – legt keinen echten Systembenutzer an (das echte /etc/passwd
+# des Harness-Hosts darf NICHT verändert werden), sondern nur einen Marker.
+STATE="${HARNESS_STATE:?HARNESS_STATE fehlt}"
+echo "useradd $*" >> "$STATE/useradd-calls.log"
+exit 0

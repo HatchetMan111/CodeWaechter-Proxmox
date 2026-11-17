@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Mock: systemctl – state-basiert für codewaechter.service.
+set -uo pipefail
+
+STATE="${HARNESS_STATE:?HARNESS_STATE fehlt}"
+mkdir -p "$STATE/systemd"
+
+cmd="${1:-}"
+[[ $# -gt 0 ]] && shift
+
+quiet=false
+now=false
+units=()
+for a in "$@"; do
+    case "$a" in
+        --quiet | -q) quiet=true ;;
+        --now) now=true ;;
+        --no-pager) ;;
+        -*) ;;
+        *) units+=("$a") ;;
+    esac
+done
+
+case "$cmd" in
+    daemon-reload)
+        touch "$STATE/systemd/.daemon-reloaded"
+        ;;
+    enable)
+        for u in "${units[@]}"; do
+            touch "$STATE/systemd/$u.enabled"
+            if $now; then
+                touch "$STATE/systemd/$u.active"
+            fi
+        done
+        ;;
+    restart | start)
+        for u in "${units[@]}"; do
+            touch "$STATE/systemd/$u.active"
+        done
+        ;;
+    stop)
+        for u in "${units[@]}"; do
+            rm -f "$STATE/systemd/$u.active"
+        done
+        ;;
+    is-active)
+        u="${units[0]:-}"
+        if [[ -n "$u" && -f "$STATE/systemd/$u.active" ]]; then
+            $quiet || echo "active"
+            exit 0
+        fi
+        $quiet || echo "inactive"
+        exit 3
+        ;;
+    journalctl)
+        echo "mock-systemctl-journal"
+        ;;
+    *)
+        echo "mock-systemctl: unbekannter Befehl: $cmd" >&2
+        exit 64
+        ;;
+esac
+exit 0

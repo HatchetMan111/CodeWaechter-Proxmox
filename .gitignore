@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+app/frontend/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Laufzeitdaten (liegen im CT unter /opt/codewaechter/data)
+*.db
+app/backend/*.db
+
+# Logs / Temp
+*.log
+/tmp/

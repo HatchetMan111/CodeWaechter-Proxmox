@@ -1,0 +1,24 @@
+[Unit]
+Description=CodeWächter – lokale Code-Review- & Planungs-App
+Documentation=https://github.com/HatchetMan111/CodeWaechter-Proxmox
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codewaechter
+Group=codewaechter
+WorkingDirectory=/opt/codewaechter/src/backend
+EnvironmentFile=-/opt/codewaechter/.env.runtime
+
+# FastAPI/uvicorn serviert Frontend (static/) + /api/*.
+# __PORT__ wird vom Installer ersetzt (--port, Default 8030).
+ExecStart=/opt/codewaechter/.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port __PORT__
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

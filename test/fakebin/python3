@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Mock: python3 – hermetisch (kein Netz im Sandbox-Harness):
+#   -m venv DIR      → Fake-venv anlegen (.venv/bin/python + pip als Wrapper)
+#   -m pip …/.venv/bin/pip … → Exit 0 (pip-Install simulieren)
+#   -c "import …"    → Exit 0 (Abhängigkeits-Check des inner Scripts)
+set -uo pipefail
+
+STATE="${HARNESS_STATE:?HARNESS_STATE fehlt}"
+
+cmd="${1:-}"
+[[ $# -gt 0 ]] && shift
+
+case "$cmd" in
+    -m)
+        sub="${1:-}"
+        [[ $# -gt 0 ]] && shift
+        case "$sub" in
+            venv)
+                dir="${1:?venv-Ziel fehlt}"
+                mkdir -p "$dir/bin"
+                cat > "$dir/bin/python" <<'PYEOF'
+#!/usr/bin/env bash
+exec python3 "$@"
+PYEOF
+                cat > "$dir/bin/pip" <<'PIPEOF'
+#!/usr/bin/env bash
+echo "mock-pip (venv): $*"
+exit 0
+PIPEOF
+                chmod +x "$dir/bin/python" "$dir/bin/pip"
+                echo "mock-python3: venv unter $dir angelegt"
+                exit 0
+                ;;
+            pip)
+                echo "mock-python3: pip $*"
+                exit 0
+                ;;
+            *)
+                echo "mock-python3: -m $sub nicht gemockt" >&2
+                exit 64
+                ;;
+        esac
+        ;;
+    -c)
+        # Import-/Versions-Checks: immer erfolgreich
+        exit 0
+        ;;
+    --version)
+        echo "Python 3.11.2 (mock)"
+        exit 0
+        ;;
+    *)
+        echo "mock-python3: $cmd $* (ignoriert)"
+        exit 0
+        ;;
+esac
