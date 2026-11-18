@@ -146,11 +146,10 @@ def _extract_json_array(text: str) -> list[dict] | None:
 def build_plan(findings: list[dict], project_name: str,
                llm_cfg: dict | None = None) -> tuple[list[dict], str]:
     """Erzeugt den Plan. Rückgabe: (Schritte, Quelle) mit Quelle in
-    {'regeln', 'llm'}. Mit LLM-Konfiguration wird zuerst der LLM-Plan versucht;
-    schlägt der fehl (offline, falsches Format, Timeout), folgt der
-    deterministische Plan – der LLM-Fehler wird als Schritt-Detail nicht,
-    aber in run.plan_source bemerkbar; der Rückgabewert 'regeln-fallback'
-    signalisiert es dem Aufrufer für den Log."""
+    {'regeln', 'llm', 'regeln-fallback'}. Mit LLM-Konfiguration wird zuerst
+    der LLM-Plan versucht; schlägt der fehl (offline, falsches Format,
+    Timeout), folgt der deterministische Plan – 'regeln-fallback' macht den
+    Ausfall in der UI sichtbar, statt ihn still zu verschlucken."""
     if llm_cfg and llm_cfg.get("base_url") and llm_cfg.get("model"):
         try:
             text = chat_completion(
@@ -181,6 +180,8 @@ def build_plan(findings: list[dict], project_name: str,
                 return steps, "llm"
         except Exception:
             pass  # Fallback unten – die App darf nie am LLM hängen
+        # LLM-Versuch fehlgeschlagen (Endpoint tot ODER unparsebare Antwort)
+        return build_rule_plan(findings), "regeln-fallback"
     return build_rule_plan(findings), "regeln"
 
 

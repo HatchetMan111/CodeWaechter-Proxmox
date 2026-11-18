@@ -94,6 +94,30 @@ def test_analyze_rerun_carries_done(clean_db, sample_project):
     assert len(runs) == 2
 
 
+def test_rerun_scopes_findings_to_latest_run(clean_db, sample_project):
+    """Re-Run darf Findings/Counts NICHT doppeln (Bug-Fix: alles bezieht sich
+    auf den letzten Lauf)."""
+    pid = api_project_create(
+        ProjectCreate(name="Scope", source_type="path", source_ref=str(sample_project)))["id"]
+
+    r1 = api_project_analyze(pid)
+    n1 = len(api_findings(pid))
+    assert n1 > 0
+
+    # Einen alten Finding-Status ändern – darf den neuen Lauf nicht beeindrucken
+    api_finding_patch(api_findings(pid)[0]["id"], FindingPatch(status="ignoriert"))
+
+    r2 = api_project_analyze(pid)
+    findings2 = api_findings(pid)
+    assert len(findings2) == n1, "Re-Run doppelt die Findings nicht"
+    assert all(f["run_id"] == r2["run_id"] for f in findings2)
+
+    # Dashboard-Counts zählen nur den letzten Lauf
+    p = [x for x in api_projects() if x["id"] == pid][0]
+    assert p["offen_hoch"] == r2["counts"]["hoch"]
+    assert p["offen_mittel"] == r2["counts"]["mittel"]
+
+
 def test_upload_zip_flow(clean_db, sample_project):
     body = ProjectCreate(name="ZipProj", source_type="upload")
     project = api_project_create(body)

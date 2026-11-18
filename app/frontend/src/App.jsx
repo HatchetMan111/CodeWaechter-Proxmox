@@ -15,6 +15,19 @@ async function api(path, options = {}) {
 const SEV_ORDER = ['hoch', 'mittel', 'niedrig', 'info']
 const SEV_LABEL = { hoch: 'Hoch', mittel: 'Mittel', niedrig: 'Niedrig', info: 'Info' }
 
+// plan_source → Anzeigetext (regeln-fallback = LLM war konfiguriert, ist aber
+// ausgefallen → ehrlich anzeigen, statt still die Regel-Engine zu nutzen)
+function planSourceLabel(source) {
+  if (source === 'llm') return '🤖 LLM'
+  if (source === 'regeln-fallback') return '⚙️ Regel-Engine (LLM-Fallback ⚠️)'
+  return '⚙️ Regel-Engine'
+}
+function planSourceShort(source) {
+  if (source === 'llm') return 'LLM'
+  if (source === 'regeln-fallback') return 'Regel-Engine (LLM-Fallback)'
+  return 'Regel-Engine'
+}
+
 function toastText(err) {
   return err && err.message ? err.message : String(err)
 }
@@ -74,6 +87,9 @@ function NewProjectModal({ onClose, onCreated, showToast }) {
   const submit = async () => {
     setBusy(true)
     try {
+      if (tab === 'upload' && !file) {
+        throw new Error('Bitte zuerst eine .zip-/.tar.gz-Datei auswählen.')
+      }
       const body = { name, source_type: tab, source_ref: sourceRef, description: '' }
       const project = await api('/api/projects', {
         method: 'POST',
@@ -81,11 +97,16 @@ function NewProjectModal({ onClose, onCreated, showToast }) {
         body: JSON.stringify(body),
       })
       if (tab === 'upload') {
-        if (!file) throw new Error('Bitte zuerst eine .zip-/.tar.gz-Datei auswählen.')
-        const fd = new FormData()
-        fd.append('file', file)
-        const up = await api(`/api/projects/${project.id}/upload`, { method: 'POST', body: fd })
-        showToast(`ok`, `Archiv entpackt: ${up.dateien} Dateien`)
+        try {
+          const fd = new FormData()
+          fd.append('file', file)
+          const up = await api(`/api/projects/${project.id}/upload`, { method: 'POST', body: fd })
+          showToast(`ok`, `Archiv entpackt: ${up.dateien} Dateien`)
+        } catch (err) {
+          // Upload fehlgeschlagen → Projekt wieder aufräumen (kein Waisen-Datensatz)
+          try { await api(`/api/projects/${project.id}`, { method: 'DELETE' }) } catch { /* ignorieren */ }
+          throw err
+        }
       }
       onCreated(project)
     } catch (err) {
@@ -245,7 +266,7 @@ function Dashboard({ onOpen, onNew, onSettings, showToast }) {
     showToast('info', `Analysiere „${p.name}" …`)
     try {
       const r = await api(`/api/projects/${p.id}/analyze`, { method: 'POST' })
-      showToast('ok', `„${p.name}": Score ${r.score}/100 · ${r.counts.hoch} hoch · ${r.counts.mittel} mittel · Plan: ${r.plan_source === 'llm' ? 'LLM' : 'Regel-Engine'}`)
+      showToast('ok', `„${p.name}": Score ${r.score}/100 · ${r.counts.hoch} hoch · ${r.counts.mittel} mittel · Plan: ${planSourceShort(r.plan_source)}`)
       reload()
     } catch (err) {
       showToast('err', toastText(err))
@@ -335,7 +356,6 @@ function ProjectView({ id, onBack, showToast }) {
   const [plan, setPlan] = useState([])
   const [runs, setRuns] = useState([])
   const [analyzing, setAnalyzing] = useState(false)
-  const findingRefs = useRef({})
 
   const reloadAll = useCallback(async () => {
     try {
@@ -409,7 +429,7 @@ function ProjectView({ id, onBack, showToast }) {
               {detail.local_path || detail.source_ref}
               {detail.letzter_lauf && (
                 <> · {detail.letzter_lauf.files} Dateien · {detail.letzter_lauf.lines} Zeilen ·
-                  {' '}Plan aus {detail.letzter_lauf.plan_source === 'llm' ? '🤖 LLM' : '⚙️ Regel-Engine'}</>
+                  {' '}Plan aus {planSourceLabel(detail.letzter_lauf.plan_source)}</>
               )}
             </p>
           </div>
@@ -508,7 +528,7 @@ function ProjectView({ id, onBack, showToast }) {
                 <td>{r.counts.mittel}</td>
                 <td>{r.counts.niedrig}</td>
                 <td>{r.counts.info}</td>
-                <td>{r.plan_source === 'llm' ? '🤖' : '⚙️'}</td>
+                <td title={r.plan_source}>{r.plan_source === 'llm' ? '🤖' : r.plan_source === 'regeln-fallback' ? '⚠️⚙️' : '⚙️'}</td>
               </tr>
             ))}
           </tbody>

@@ -115,8 +115,14 @@ fi
 
 # ── Hilfsfunktionen ────────────────────────────────────────────────────────
 find_free_id() {
-    local id="$ID_SCAN_START"
-    while pct list 2>/dev/null | awk '{print $1}' | grep -qx "$id"; do
+    # ID-Kollisionen auch mit VMs vermeiden (qm list; Community-Scripts-Stil).
+    # Fehlt qm (Harness/Univ-Host), wird es einfach übersprungen.
+    local id="$ID_SCAN_START" has_qm=false
+    if command -v qm >/dev/null 2>&1; then
+        has_qm=true
+    fi
+    while pct list 2>/dev/null | awk '{print $1}' | grep -qx "$id" \
+        || { $has_qm && qm list 2>/dev/null | awk '{print $1}' | grep -qx "$id"; }; do
         id=$((id + 1))
     done
     echo "$id"

@@ -10,8 +10,8 @@ bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/CodeWaech
 
 Das Script (im Stil der [Proxmox VE Community Scripts](https://community-scripts.github.io/ProxmoxVE)):
 
-- erstellt automatisch einen **unprivilegierten LXC-Container** (Debian 12, `nesting=1`, `onboot=1`, 2 vCPU, 2 GB RAM, 8 GB Disk – alles per Option änderbar; CT-ID wird automatisch frei gewählt, Default-Scan ab 200)
-- installiert FastAPI + uvicorn in einem venv und serviert die React/Oberfläche aus dem mitgelieferten Build (**kein Node.js im Container**)
+- erstellt automatisch einen **unprivilegierten LXC-Container** (Debian 12, `nesting=1`, `onboot=1`, 2 vCPU, 2 GB RAM, 8 GB Disk – alles per Option änderbar; CT-ID wird automatisch frei gewählt, Default-Scan ab 200 – kollisionsfrei auch gegen bestehende **VMs** (`qm list`))
+- installiert FastAPI + uvicorn in einem venv und serviert die React-Oberfläche aus dem mitgelieferten Build (**kein Node.js im Container**)
 - richtet den systemd-Service `codewaechter.service` ein (`Restart=always`, `After=network-online.target`)
 - verifiziert die Installation selbst (Service aktiv, API 200, Web-UI 200, API-Identität) und gibt die finale URL aus
 
@@ -31,8 +31,8 @@ Alle Optionen: `--id --hostname --storage --rootfs --cores --memory --swap --bri
 | **Regel-Engine (offline)** | Secrets (AWS/GitHub/Anthropic-Keys, private Keys, DB-URLs mit Passwort, hardcodierte Passwörter), Debug-Reste (`breakpoint()`, `console.log`, `debugger`), `eval`/`exec`, bare `except`, `shell=True`, SQL per f-String/Konkatenation, eingecheckte Artefakte (`node_modules`, `__pycache__`, `.env`, Schlüsseldateien), fehlende Tests/README, Riesen-Dateien, harte IPs |
 | **Score** | 0–100, abgeleitet aus den Schweregraden (hoch −12, mittel −5, niedrig −1) |
 | **Plan-Generator** | Findings → priorisierte Checkliste (P0 Sicherheit → P1 demnächst → P2 Hygiene) mit Tipps pro Regel; Fortschritt bleibt über Re-Runs erhalten |
-| **LLM (optional)** | ⚙️ Einstellungen → OpenAI-kompatible Base-URL + Modell (z. B. `http://<lan-ip>:8000/v1` + `qwen2.5-coder`); Verbindungstest eingebaut; bei Ausfall greift automatisch der Regel-Plan |
-| **Verlauf** | Score- und Findings-Historie je Projekt |
+| **LLM (optional)** | ⚙️ Einstellungen → OpenAI-kompatible Base-URL + Modell (z. B. `http://<lan-ip>:8000/v1` + `qwen2.5-coder`); Verbindungstest eingebaut; bei Ausfall greift automatisch der Regel-Plan – die UI zeigt das ehrlich als „Regel-Engine (LLM-Fallback)" an |
+| **Verlauf** | Score- und Findings-Historie je Projekt; Findings, Counts und Plan zeigen immer den **letzten Lauf** (Re-Runs zählen nichts doppelt) |
 
 ## Update / Deinstall / Status
 
@@ -65,14 +65,14 @@ app/backend/    FastAPI (main.py, db.py, analyzer.py, planner.py, llm.py)
 app/frontend/   React 18 + Vite (npm run build → backend/static)
 install/        codewaechter.sh – Installer (set -Eeuo pipefail)
 systemd/        codewaechter.service (Unit-Vorlage mit __PORT__)
-tests/          pytest-Backend-Tests (28)
+tests/          pytest-Backend-Tests (31)
 test/           Mock-Harness (unshare -rm + fakebin, 16 Cases) – ohne Proxmox-Host lauffähig
 ```
 
 Tests lokal ausführen (ohne Proxmox):
 
 ```bash
-python3 -m pytest tests/          # 28 Backend-Tests
+python3 -m pytest tests/          # 31 Backend-Tests
 test/run-tests.sh                 # 16 Harness-Cases (84 Assertions)
 ```
 

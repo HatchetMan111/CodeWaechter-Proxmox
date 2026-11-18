@@ -101,3 +101,21 @@ def test_max_findings_per_rule_path(sample_project):
     for f in result["findings"]:
         per[(f["rule"], f["path"])] = per.get((f["rule"], f["path"]), 0) + 1
     assert all(v <= 3 for v in per.values())
+
+
+def test_symlink_cycle_does_not_hang(tmp_path):
+    """Ein Repo, das sich selbst verlinkt, darf die Analyse NICHT aufhängen
+    (Bug-Fix: os.walk mit Symlink-Abstieg statt rglob)."""
+    import os
+
+    root = tmp_path / "loopproj"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "mod.py").write_text("x = 1\n")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_x.py").write_text("def test_x():\n    pass\n")
+    (root / "README.md").write_text("# Loop\n")
+    os.symlink(root, root / "selfloop")  # Zyklus: root/selfloop → root
+
+    result = analyze_project(root)  # läuft ohne Endlosschleife
+    assert result["stats"]["files"] >= 2
+    assert result["score"] == 100

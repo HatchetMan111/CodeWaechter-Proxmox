@@ -9,6 +9,7 @@ berechnen. Keine Cloud, keine externen Abhängigkeiten – nur Python-Stdlib.
 
 import ast
 import fnmatch
+import os
 import re
 from pathlib import Path
 
@@ -160,14 +161,24 @@ def _is_placeholder(value: str) -> bool:
 def _iter_source_files(root: Path, exclude_patterns: list[str]):
     """Liefert ALLE Dateien (auch in ignorierten Verzeichnissen – die braucht
     die Projekt-Level-Regel „eingecheckte Artefakte“). Der Aufrufer entscheidet,
-    welche Dateien inhaltlich gescannt werden."""
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.is_symlink():
-            continue
-        rel = path.relative_to(root).as_posix()
-        if any(fnmatch.fnmatch(rel, pat.strip()) for pat in exclude_patterns if pat.strip()):
-            continue
-        yield rel, path
+    welche Dateien inhaltlich gescannt werden.
+
+    os.walk statt rglob: Symlink-Verzeichnisse werden NICHT absteigt – ein
+    Repo, das sich selbst (oder einen Elternordner) verlinkt, würde rglob
+    sonst in einer Endlosschleife aufhängen."""
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [
+            d for d in dirnames
+            if not os.path.islink(os.path.join(dirpath, d))
+        ]
+        for name in filenames:
+            path = Path(dirpath) / name
+            if path.is_symlink():
+                continue
+            rel = path.relative_to(root).as_posix()
+            if any(fnmatch.fnmatch(rel, pat.strip()) for pat in exclude_patterns if pat.strip()):
+                continue
+            yield rel, path
 
 
 def _in_ignored_dir(rel: str) -> bool:

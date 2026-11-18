@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 import analyzer
 import planner
-from db import (APP_VERSION, DATA_DIR, PROJECTS_DIR, get_conn,
+from db import (APP_VERSION, DATA_DIR, PROJECTS_DIR, conn_scope,
                 get_setting, init_db, now_iso, set_setting)
 
 from llm import test_connection
@@ -33,6 +33,7 @@ from llm import test_connection
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 UPLOAD_MAX_BYTES = 200 * 1024 * 1024  # 200 MB – ZIP/Tarball eines Repos
+EXTRACT_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB entpackt (Zip-Bomben-Grenze)
 CLONE_TIMEOUT = 300
 
 app = FastAPI(title="CodeWächter", version=APP_VERSION, docs_url=None, redoc_url=None)
@@ -136,13 +137,22 @@ def _strip_common_root(members: list[str]) -> list[str]:
 
 
 def _extract_archive(data: bytes, filename: str, target: Path) -> int:
-    """ZIP oder Tar.gz/tar nach target entpacken (traversal-sicher).
-    Rückgabe: Anzahl entpackter Dateien."""
+    """ZIP oder Tar.gz/tar nach target entpacken (traversal-sicher,
+    entpackte Gesamtgröße begrenzt). Rückgabe: Anzahl entpackter Dateien."""
     target.mkdir(parents=True, exist_ok=True)
     count = 0
     if filename.lower().endswith(".zip"):
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             names = zf.namelist()
+            # Zip-Bomben-Grenze: entpackte Gesamtgröße prüfen, BEVOR etwas
+            # geschrieben wird (200 MB Archiv kann Gigabytes expandieren).
+            total = sum(i.file_size for i in zf.infolist())
+            if total > EXTRACT_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Archiv würde {total // (1024 * 1024)} MB entpackt "
+                           f"(Limit: {EXTRACT_MAX_BYTES // (1024 * 1024)} MB).",
+                )
             stripped = _strip_common_root([n for n in names if n.strip("/")])
             mapping = {}
             for orig, new in zip([n for n in names if n.strip("/")], stripped):
@@ -161,6 +171,13 @@ def _extract_archive(data: bytes, filename: str, target: Path) -> int:
         mode = "r:gz" if filename.lower().endswith((".tar.gz", ".tgz")) else "r:"
         with tarfile.open(fileobj=io.BytesIO(data), mode=mode) as tf:
             members = [m for m in tf.getmembers() if m.isfile()]
+            total = sum(m.size for m in members)
+            if total > EXTRACT_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Archiv würde {total // (1024 * 1024)} MB entpackt "
+                           f"(Limit: {EXTRACT_MAX_BYTES // (1024 * 1024)} MB).",
+                )
             stripped = _strip_common_root([m.name for m in members])
             for member, new_name in zip(members, stripped):
                 if not new_name.strip():
@@ -200,7 +217,7 @@ def _clone_repository(url: str, target: Path) -> None:
 
 @app.get("/api/status")
 def api_status():
-    with get_conn() as conn:
+    with conn_scope() as conn:
         projects = conn.execute("SELECT COUNT(*) AS n FROM projects").fetchone()["n"]
     return {"app": "CodeWächter", "version": APP_VERSION, "projects": projects,
             "data_dir": str(DATA_DIR)}
@@ -210,21 +227,28 @@ def api_status():
 
 @app.get("/api/projects")
 def api_projects():
-    with get_conn() as conn:
+    with conn_scope() as conn:
+        # Findings-Zähler beziehen sich IMMER auf den letzten Lauf – sonst
+        # würden alte Läufe mitgezählt und die Karten doppelt angezeigt.
+        latest = "(SELECT MAX(r.id) FROM runs r WHERE r.project_id = p.id)"
         rows = conn.execute(
             "SELECT p.*, "
-            "(SELECT COUNT(*) FROM findings f WHERE f.project_id = p.id "
+            f"(SELECT COUNT(*) FROM findings f WHERE f.project_id = p.id "
+            f" AND f.run_id = {latest} "
             " AND f.status = 'offen' AND f.severity = 'hoch') AS offen_hoch, "
-            "(SELECT COUNT(*) FROM findings f WHERE f.project_id = p.id "
+            f"(SELECT COUNT(*) FROM findings f WHERE f.project_id = p.id "
+            f" AND f.run_id = {latest} "
             " AND f.status = 'offen' AND f.severity = 'mittel') AS offen_mittel, "
-            "(SELECT COUNT(*) FROM findings f WHERE f.project_id = p.id "
+            f"(SELECT COUNT(*) FROM findings f WHERE f.project_id = p.id "
+            f" AND f.run_id = {latest} "
             " AND f.status = 'offen' AND f.severity = 'niedrig') AS offen_niedrig, "
-            "(SELECT COUNT(*) FROM findings f WHERE f.project_id = p.id "
+            f"(SELECT COUNT(*) FROM findings f WHERE f.project_id = p.id "
+            f" AND f.run_id = {latest} "
             " AND f.status = 'offen' AND f.severity = 'info') AS offen_info, "
-            "(SELECT COUNT(*) FROM plan_items pi WHERE pi.project_id = p.id "
-            " AND pi.run_id = (SELECT MAX(r.id) FROM runs r WHERE r.project_id = p.id)) AS plan_gesamt, "
-            "(SELECT COUNT(*) FROM plan_items pi WHERE pi.project_id = p.id "
-            " AND pi.run_id = (SELECT MAX(r.id) FROM runs r WHERE r.project_id = p.id) "
+            f"(SELECT COUNT(*) FROM plan_items pi WHERE pi.project_id = p.id "
+            f" AND pi.run_id = {latest}) AS plan_gesamt, "
+            f"(SELECT COUNT(*) FROM plan_items pi WHERE pi.project_id = p.id "
+            f" AND pi.run_id = {latest} "
             " AND pi.done = 1) AS plan_erledigt "
             "FROM projects p ORDER BY p.created_at DESC"
         ).fetchall()
@@ -237,14 +261,13 @@ def api_project_create(body: ProjectCreate):
     if source_type not in ("git", "path", "upload"):
         raise HTTPException(status_code=400,
                             detail=f"Unbekannter Quell-Typ: {source_type}")
-    with get_conn() as conn:
+    with conn_scope() as conn:
         pid = conn.execute(
             "INSERT INTO projects(name, source_type, source_ref, description, created_at) "
             "VALUES(?, ?, ?, ?, ?)",
             (body.name or "Neues Projekt", source_type, body.source_ref,
              body.description, now_iso()),
         ).lastrowid
-        conn.commit()
 
     # Verzeichnis erst nach der DB-Zeile anlegen (damit wir die ID haben)…
     target = _project_dir(pid, body.name or f"projekt-{pid}")
@@ -268,31 +291,28 @@ def api_project_create(body: ProjectCreate):
             target.mkdir(parents=True, exist_ok=True)
             local_path = str(target)
     except HTTPException:
-        with get_conn() as conn:
+        with conn_scope() as conn:
             conn.execute("DELETE FROM projects WHERE id = ?", (pid,))
-            conn.commit()
         shutil.rmtree(target, ignore_errors=True)
         raise
     except Exception as exc:
-        with get_conn() as conn:
+        with conn_scope() as conn:
             conn.execute("DELETE FROM projects WHERE id = ?", (pid,))
-            conn.commit()
         shutil.rmtree(target, ignore_errors=True)
         raise HTTPException(status_code=500,
                             detail=f"Projekt-Quelle konnte nicht eingerichtet werden: "
                                    f"{type(exc).__name__}: {exc}") from exc
 
-    with get_conn() as conn:
+    with conn_scope() as conn:
         conn.execute("UPDATE projects SET name = ?, local_path = ? WHERE id = ?",
                      (name, local_path, pid))
-        conn.commit()
         row = _get_project(conn, pid)
         return dict(row)
 
 
 @app.post("/api/projects/{pid}/upload")
 def api_project_upload(pid: int, file: UploadFile = File(...)):
-    with get_conn() as conn:
+    with conn_scope() as conn:
         row = _get_project(conn, pid)
         current_path = row["local_path"]
     data = file.file.read(UPLOAD_MAX_BYTES + 1)
@@ -319,16 +339,15 @@ def api_project_upload(pid: int, file: UploadFile = File(...)):
     if count == 0:
         raise HTTPException(status_code=400,
                             detail="Archiv enthält keine auspackbaren Dateien.")
-    with get_conn() as conn:
+    with conn_scope() as conn:
         conn.execute("UPDATE projects SET local_path = ? WHERE id = ?",
                      (str(target), pid))
-        conn.commit()
     return {"ok": True, "dateien": count, "ziel": str(target)}
 
 
 @app.get("/api/projects/{pid}")
 def api_project_detail(pid: int):
-    with get_conn() as conn:
+    with conn_scope() as conn:
         project = dict(_get_project(conn, pid))
         run = conn.execute(
             "SELECT * FROM runs WHERE project_id = ? ORDER BY id DESC LIMIT 1",
@@ -345,11 +364,10 @@ def api_project_detail(pid: int):
 
 @app.delete("/api/projects/{pid}")
 def api_project_delete(pid: int):
-    with get_conn() as conn:
+    with conn_scope() as conn:
         row = _get_project(conn, pid)
         local_path = row["local_path"]
         conn.execute("DELETE FROM projects WHERE id = ?", (pid,))
-        conn.commit()
     # Externe Pfade (z. B. /root/repos/…) bleiben unangetastet – nur
     # verwaltete Verzeichnisse unter data/projects/ werden gelöscht.
     if local_path and Path(local_path).resolve().is_relative_to(PROJECTS_DIR.resolve()):
@@ -361,7 +379,7 @@ def api_project_delete(pid: int):
 
 @app.post("/api/projects/{pid}/analyze")
 def api_project_analyze(pid: int):
-    with get_conn() as conn:
+    with conn_scope() as conn:
         row = _get_project(conn, pid)
         local_path = row["local_path"]
         project_name = row["name"]
@@ -370,14 +388,14 @@ def api_project_analyze(pid: int):
                             detail=f"Projekt-Verzeichnis fehlt: {local_path}\n"
                                    f"Lösung: bei Upload-Projekten zuerst eine Archiv-Datei hochladen.")
 
-    with get_conn() as conn:
+    with conn_scope() as conn:
         exclude = _exclude_patterns(conn)
         llm_cfg = _llm_cfg(conn)
 
     result = analyzer.analyze_project(Path(local_path), exclude)
 
     # Bestehende Erledigt-Markierungen für Fortschritts-Übernahme einsammeln
-    with get_conn() as conn:
+    with conn_scope() as conn:
         old_plan = conn.execute(
             "SELECT title, priority, done FROM plan_items WHERE project_id = ? "
             "ORDER BY id DESC LIMIT 200", (pid,),
@@ -386,7 +404,7 @@ def api_project_analyze(pid: int):
     steps, plan_source = planner.build_plan(result["findings"], project_name, llm_cfg)
     planner.carry_over_done(steps, [dict(o) for o in old_plan])
 
-    with get_conn() as conn:
+    with conn_scope() as conn:
         cur = conn.execute(
             "INSERT INTO runs(project_id, started_at, files, lines, score, "
             "plan_source, counts_json, languages_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
@@ -411,7 +429,6 @@ def api_project_analyze(pid: int):
             )
         conn.execute("UPDATE projects SET score = ?, last_run_at = ? WHERE id = ?",
                      (result["score"], now_iso(), pid))
-        conn.commit()
         return {"run_id": run_id, "score": result["score"],
                 "counts": result["counts"], "stats": result["stats"],
                 "plan": [{"id": None, "position": i, **s} for i, s in enumerate(steps, start=1)],
@@ -422,10 +439,16 @@ def api_project_analyze(pid: int):
 
 @app.get("/api/projects/{pid}/findings")
 def api_findings(pid: int, severity: str = "", status: str = "offen"):
-    with get_conn() as conn:
+    with conn_scope() as conn:
         _get_project(conn, pid)
-        sql = ("SELECT * FROM findings WHERE project_id = ?")
-        params: list = [pid]
+        # Nur der letzte Lauf – ältere Läufe würden Findings doppelt listen.
+        row = conn.execute(
+            "SELECT MAX(id) AS latest FROM runs WHERE project_id = ?", (pid,)
+        ).fetchone()
+        if row["latest"] is None:
+            return []
+        sql = "SELECT * FROM findings WHERE project_id = ? AND run_id = ?"
+        params: list = [pid, row["latest"]]
         if severity:
             sql += " AND severity = ?"
             params.append(severity)
@@ -442,10 +465,9 @@ def api_findings(pid: int, severity: str = "", status: str = "offen"):
 def api_finding_patch(fid: int, body: FindingPatch):
     if body.status not in ("offen", "erledigt", "ignoriert"):
         raise HTTPException(status_code=400, detail=f"Unbekannter Status: {body.status}")
-    with get_conn() as conn:
+    with conn_scope() as conn:
         cur = conn.execute("UPDATE findings SET status = ? WHERE id = ?",
                            (body.status, fid))
-        conn.commit()
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Finding nicht gefunden.")
         return {"ok": True}
@@ -455,7 +477,7 @@ def api_finding_patch(fid: int, body: FindingPatch):
 
 @app.get("/api/projects/{pid}/plan")
 def api_plan(pid: int):
-    with get_conn() as conn:
+    with conn_scope() as conn:
         _get_project(conn, pid)
         run = conn.execute(
             "SELECT id FROM runs WHERE project_id = ? ORDER BY id DESC LIMIT 1",
@@ -472,10 +494,9 @@ def api_plan(pid: int):
 
 @app.patch("/api/plan/{item_id}")
 def api_plan_patch(item_id: int, body: PlanPatch):
-    with get_conn() as conn:
+    with conn_scope() as conn:
         cur = conn.execute("UPDATE plan_items SET done = ? WHERE id = ?",
                            (1 if body.done else 0, item_id))
-        conn.commit()
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Plan-Schritt nicht gefunden.")
         return {"ok": True}
@@ -485,7 +506,7 @@ def api_plan_patch(item_id: int, body: PlanPatch):
 
 @app.get("/api/projects/{pid}/runs")
 def api_runs(pid: int):
-    with get_conn() as conn:
+    with conn_scope() as conn:
         _get_project(conn, pid)
         rows = conn.execute(
             "SELECT id, started_at, files, lines, score, plan_source, counts_json "
@@ -503,7 +524,7 @@ def api_runs(pid: int):
 
 @app.get("/api/settings")
 def api_settings():
-    with get_conn() as conn:
+    with conn_scope() as conn:
         return {
             "llm_base_url": get_setting(conn, "llm_base_url"),
             "llm_api_key": get_setting(conn, "llm_api_key"),
@@ -514,13 +535,19 @@ def api_settings():
 
 @app.put("/api/settings")
 def api_settings_put(body: SettingsPatch):
-    with get_conn() as conn:
+    with conn_scope() as conn:
         for key in ("llm_base_url", "llm_api_key", "llm_model", "exclude_patterns"):
             value = getattr(body, key)
             if value is not None:
                 set_setting(conn, key, value.strip())
-        conn.commit()
-        return api_settings()
+        # Rückgabe über DIESE Verbindung – ein zweiter conn_scope würde die
+        # noch nicht committeten Werte nicht sehen (Stale-Read).
+        return {
+            "llm_base_url": get_setting(conn, "llm_base_url"),
+            "llm_api_key": get_setting(conn, "llm_api_key"),
+            "llm_model": get_setting(conn, "llm_model"),
+            "exclude_patterns": get_setting(conn, "exclude_patterns"),
+        }
 
 
 @app.post("/api/settings/test-llm")

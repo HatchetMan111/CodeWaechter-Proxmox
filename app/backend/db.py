@@ -8,7 +8,7 @@ liegen in EINER SQLite-Datei unter DATA_DIR – vollkommen lokal, kein Server.
 
 import os
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -94,6 +94,24 @@ def get_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+@contextmanager
+def conn_scope():
+    """Verbindung mit garantiertem Schließen + Commit/Rollback.
+
+    (sqlite3-Verbindungen schließen sich beim `with conn:` NICHT selbst –
+    ohne conn_scope würden Handles anfallen, bis der GC sie einsammelt.)
+    """
+    conn = get_conn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db() -> None:

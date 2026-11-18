@@ -45,8 +45,19 @@ def test_build_plan_llm_fallback_on_garbage(monkeypatch):
     monkeypatch.setattr(planner, "chat_completion", broken_chat)
     steps, source = build_plan([_finding("secret.aws-key", "hoch")], "P",
                                {"base_url": "http://x", "model": "m"})
-    assert source == "regeln"
+    assert source == "regeln-fallback"  # LLM war konfiguriert und ist ausgefallen
     assert any("AWS" in s["title"] for s in steps)
+
+
+def test_build_plan_llm_fallback_on_unparseable(monkeypatch):
+    import planner
+
+    def nonsense_chat(**kwargs):
+        return "Ich kann heute kein JSON liefern, sorry."
+    monkeypatch.setattr(planner, "chat_completion", nonsense_chat)
+    _, source = build_plan([_finding("code.todo", "info")], "P",
+                           {"base_url": "http://x", "model": "m"})
+    assert source == "regeln-fallback"
 
 
 def test_build_plan_llm_success(monkeypatch):
